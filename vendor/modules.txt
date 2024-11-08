@@ -288,6 +288,24 @@ github.com/ProtonMail/go-crypto/openpgp/internal/ecc
 github.com/ProtonMail/go-crypto/openpgp/internal/encoding
 github.com/ProtonMail/go-crypto/openpgp/packet
 github.com/ProtonMail/go-crypto/openpgp/s2k
+# github.com/aerospike/aerospike-client-go/v7 v7.7.2
+## explicit; go 1.20
+github.com/aerospike/aerospike-client-go/v7
+github.com/aerospike/aerospike-client-go/v7/internal/atomic
+github.com/aerospike/aerospike-client-go/v7/internal/atomic/map
+github.com/aerospike/aerospike-client-go/v7/internal/lua
+github.com/aerospike/aerospike-client-go/v7/internal/lua/resources
+github.com/aerospike/aerospike-client-go/v7/internal/seq
+github.com/aerospike/aerospike-client-go/v7/logger
+github.com/aerospike/aerospike-client-go/v7/pkg/bcrypt
+github.com/aerospike/aerospike-client-go/v7/pkg/ripemd160
+github.com/aerospike/aerospike-client-go/v7/proto/auth
+github.com/aerospike/aerospike-client-go/v7/proto/kvs
+github.com/aerospike/aerospike-client-go/v7/types
+github.com/aerospike/aerospike-client-go/v7/types/histogram
+github.com/aerospike/aerospike-client-go/v7/types/particle_type
+github.com/aerospike/aerospike-client-go/v7/types/pool
+github.com/aerospike/aerospike-client-go/v7/utils/buffer
 # github.com/andybalholm/brotli v1.1.0
 ## explicit; go 1.13
 github.com/andybalholm/brotli
@@ -1424,6 +1442,12 @@ github.com/xlab/treeprint
 # github.com/youmark/pkcs8 v0.0.0-20240726163527-a2c0da244d78
 ## explicit; go 1.17
 github.com/youmark/pkcs8
+# github.com/yuin/gopher-lua v1.1.1
+## explicit; go 1.17
+github.com/yuin/gopher-lua
+github.com/yuin/gopher-lua/ast
+github.com/yuin/gopher-lua/parse
+github.com/yuin/gopher-lua/pm
 # go.etcd.io/etcd/api/v3 v3.5.16
 ## explicit; go 1.22
 go.etcd.io/etcd/api/v3/authpb
