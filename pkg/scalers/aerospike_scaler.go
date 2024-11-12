@@ -10,7 +10,6 @@ import (
 
 	as "github.com/aerospike/aerospike-client-go/v7"
 	"github.com/go-logr/logr"
-	"github.com/sirupsen/logrus"
 	v2 "k8s.io/api/autoscaling/v2"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/metrics/pkg/apis/external_metrics"
@@ -20,10 +19,11 @@ import (
 )
 
 type aerospikeScaler struct {
-	metadata *aerospikeMetadata
-	logger   logr.Logger
-	client   *as.Client
-	policy   *as.ClientPolicy
+	metadata    *aerospikeMetadata
+	logger      logr.Logger
+	client      *as.Client
+	policy      *as.ClientPolicy
+	connections map[string]*as.Connection
 }
 
 type aerospikeMetadata struct {
@@ -64,7 +64,7 @@ func NewAerospikeScaler(config *scalersconfig.ScalerConfig) (Scaler, error) {
 		return nil, fmt.Errorf("error parsing Aerospike metadata: %s", err)
 	}
 
-	policy := getClientPolicy(metadata)
+	policy := getClientPolicy(logger, metadata)
 
 	host := as.Host{
 		Name:    metadata.AerospikeHost,
@@ -77,10 +77,11 @@ func NewAerospikeScaler(config *scalersconfig.ScalerConfig) (Scaler, error) {
 	}
 
 	return &aerospikeScaler{
-		metadata: metadata,
-		client:   client,
-		policy:   policy,
-		logger:   logger,
+		metadata:    metadata,
+		client:      client,
+		policy:      policy,
+		logger:      logger,
+		connections: make(map[string]*as.Connection),
 	}, nil
 }
 
@@ -136,12 +137,18 @@ func (s *aerospikeScaler) GetMetricsAndActivity(_ context.Context, metricName st
 
 // Close closes the Aerospike client
 func (s *aerospikeScaler) Close(_ context.Context) error {
+	for _, conn := range s.connections {
+		if conn != nil {
+			conn.Close()
+		}
+	}
+
 	s.client.Close()
 
 	return nil
 }
 
-func getClientPolicy(metadata *aerospikeMetadata) *as.ClientPolicy {
+func getClientPolicy(logger logr.Logger, metadata *aerospikeMetadata) *as.ClientPolicy {
 	policy := as.NewClientPolicy()
 	policy.User = metadata.UserName
 	policy.Password = metadata.Password
@@ -155,7 +162,7 @@ func getClientPolicy(metadata *aerospikeMetadata) *as.ClientPolicy {
 	if metadata.TLSName != "" {
 		tlsConfig, err := kedautil.NewTLSConfigWithPassword(metadata.Cert, metadata.Key, metadata.KeyPassword, metadata.CA, false)
 		if err != nil {
-			logrus.Errorf("Error creating TLS config: %v", err)
+			logger.Info("Error creating TLS config: %v", err)
 		}
 		policy.TlsConfig = tlsConfig
 	}
@@ -191,13 +198,17 @@ func (s *aerospikeScaler) getAerospikeStats() (int64, error) {
 
 	nodes := s.client.GetNodes()
 	for _, node := range nodes {
-		host := node.GetHost()
-		conn, err := s.createNewConnection(host)
-		if err != nil {
-			return 0, err
+		conn := s.connections[node.GetName()]
+		if conn == nil || !conn.IsConnected() {
+			newConn, err := s.createNewConnection(node.GetHost())
+			if err != nil {
+				return 0, err
+			}
+
+			s.connections[node.GetName()] = newConn
 		}
 
-		result, err := fetchRequestInfoFromAerospike(s.logger, []string{s.metadata.Command}, conn)
+		result, err := fetchRequestInfoFromAerospike(s.logger, []string{s.metadata.Command}, s.connections[node.GetName()])
 		if err != nil {
 			return 0, fmt.Errorf("error fetching info from Aerospike: %s", err)
 		}
@@ -210,8 +221,6 @@ func (s *aerospikeScaler) getAerospikeStats() (int64, error) {
 		}
 
 		sumVal += int(valInt)
-
-		conn.Close()
 	}
 
 	return int64(sumVal / len(nodes)), nil
@@ -234,25 +243,16 @@ func fetchRequestInfoFromAerospike(logger logr.Logger, infoKeys []string, asConn
 	rawMetrics := make(map[string]string)
 	retryCount := 3
 
-	if asConnection == nil {
-		return nil, errors.New("aerospike connection is nil")
-	}
-
 	// Retry for connection, timeout, network errors
 	// including errors from RequestInfo()
 	for i := 0; i < retryCount; i++ {
-		// Validate existing connection
-		if !asConnection.IsConnected() {
-			logger.Info("Error while connecting to aerospike server, reconnecting")
-			continue
-		}
-
 		// Info request
 		rawMetrics, err = asConnection.RequestInfo(infoKeys...)
 		if err != nil {
-			logrus.Debug("Error while requestInfo ( infoKeys...), closing connection : Error is: ", err, " and infoKeys: ", infoKeys)
+			logger.Info("Error while requestInfo ( infoKeys...), closing connection : Error is: ", err, " and infoKeys: ", infoKeys)
 			asConnection.Close()
 			//TODO: do we need to assign nil to asConnection? i.e. asConnection = nil
+			// what is the point of retry if we are closing the connection
 			continue
 		}
 
