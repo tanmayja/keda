@@ -16,6 +16,7 @@ import (
 	"k8s.io/metrics/pkg/apis/external_metrics"
 
 	"github.com/kedacore/keda/v2/pkg/scalers/scalersconfig"
+	kedautil "github.com/kedacore/keda/v2/pkg/util"
 )
 
 type aerospikeScaler struct {
@@ -26,16 +27,32 @@ type aerospikeScaler struct {
 }
 
 type aerospikeMetadata struct {
-	aerospikeHost        string
-	aerospikePort        int
-	namespace            string
-	threshold            int64
-	metricName           string
-	userName             string
-	password             string
-	useServicesAlternate bool
-	connTimeout          int64
-	command              string
+	AerospikeHost        string `keda:"name=aerospikeHost,        order=triggerMetadata"`
+	AerospikePort        int    `keda:"name=aerospikePort,        order=triggerMetadata"`
+	Threshold            int64  `keda:"name=threshold,            order=triggerMetadata"`
+	MetricName           string `keda:"name=metricName,           order=triggerMetadata"`
+	UserName             string `keda:"name=userName,             order=triggerMetadata"`
+	Password             string `keda:"name=password,             order=authParams"`
+	UseServicesAlternate bool   `keda:"name=useServicesAlternate, order=triggerMetadata"`
+	ConnTimeout          int64  `keda:"name=connTimeout,          order=triggerMetadata"`
+	Command              string `keda:"name=command,              order=triggerMetadata"`
+
+	// TLS
+	TLSName     string `keda:"name=tlsName,     order=triggerMetadata, optional"`
+	Cert        string `keda:"name=cert,        order=authParams,      optional"`
+	Key         string `keda:"name=key,         order=authParams,      optional"`
+	KeyPassword string `keda:"name=keyPassword, order=authParams,      optional"`
+	CA          string `keda:"name=ca,          order=authParams,      optional"`
+}
+
+func (s *aerospikeMetadata) Validate() error {
+	if s.TLSName != "" {
+		if s.Cert == "" || s.Key == "" {
+			return fmt.Errorf("cert and key are required for TLS")
+		}
+	}
+
+	return nil
 }
 
 // NewAerospikeScaler creates a new scaler for Aerospike
@@ -49,7 +66,12 @@ func NewAerospikeScaler(config *scalersconfig.ScalerConfig) (Scaler, error) {
 
 	policy := getClientPolicy(metadata)
 
-	client, err := as.NewClientWithPolicy(policy, metadata.aerospikeHost, metadata.aerospikePort)
+	host := as.Host{
+		Name:    metadata.AerospikeHost,
+		Port:    metadata.AerospikePort,
+		TLSName: metadata.TLSName,
+	}
+	client, err := as.NewClientWithPolicyAndHost(policy, &host)
 	if err != nil {
 		return nil, fmt.Errorf("error creating Aerospike client: %s", err)
 	}
@@ -64,11 +86,11 @@ func NewAerospikeScaler(config *scalersconfig.ScalerConfig) (Scaler, error) {
 
 // GetMetricSpecForScaling returns the metric specifications for scaling
 func (s *aerospikeScaler) GetMetricSpecForScaling(context.Context) []v2.MetricSpec {
-	targetValue := resource.NewQuantity(s.metadata.threshold, resource.DecimalSI)
+	targetValue := resource.NewQuantity(s.metadata.Threshold, resource.DecimalSI)
 
 	externalMetric := &v2.ExternalMetricSource{
 		Metric: v2.MetricIdentifier{
-			Name: s.metadata.metricName,
+			Name: s.metadata.MetricName,
 		},
 		Target: v2.MetricTarget{
 			Type:  v2.ValueMetricType,
@@ -85,44 +107,17 @@ func (s *aerospikeScaler) GetMetricSpecForScaling(context.Context) []v2.MetricSp
 }
 
 func parseAerospikeMetadata(config *scalersconfig.ScalerConfig) (*aerospikeMetadata, error) {
-	// Extracting metadata like host, port, namespace, and threshold
-	host := config.TriggerMetadata["aerospikeHost"]
-	port, err := strconv.ParseInt(config.TriggerMetadata["aerospikePort"], 10, 64)
+	meta := aerospikeMetadata{}
+	err := config.TypedConfig(&meta)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("error parsing aerospike metadata: %w", err)
 	}
 
-	threshold, err := strconv.ParseInt(config.TriggerMetadata["threshold"], 10, 64)
-	if err != nil {
-		return nil, err
-	}
-
-	connTimeout, err := strconv.ParseInt(config.TriggerMetadata["connTimeout"], 10, 64)
-	if err != nil {
-		return nil, err
-	}
-
-	useServicesAlternate, err := strconv.ParseBool(config.TriggerMetadata["useServicesAlternate"])
-	if err != nil {
-		return nil, err
-	}
-
-	return &aerospikeMetadata{
-		aerospikeHost:        host,
-		aerospikePort:        int(port),
-		namespace:            config.TriggerMetadata["namespace"],
-		threshold:            threshold,
-		metricName:           config.TriggerMetadata["metricName"],
-		userName:             config.TriggerMetadata["userName"],
-		password:             config.AuthParams["password"],
-		useServicesAlternate: useServicesAlternate,
-		connTimeout:          connTimeout,
-		command:              config.TriggerMetadata["command"],
-	}, nil
+	return &meta, nil
 }
 
 // GetMetricsAndActivity fetches external metrics and determines if scaling is needed
-func (s *aerospikeScaler) GetMetricsAndActivity(ctx context.Context, metricName string) ([]external_metrics.ExternalMetricValue, bool, error) {
+func (s *aerospikeScaler) GetMetricsAndActivity(_ context.Context, metricName string) ([]external_metrics.ExternalMetricValue, bool, error) {
 	// Fetch the current number of records from Aerospike
 	records, err := s.getAerospikeStats()
 	if err != nil {
@@ -135,11 +130,8 @@ func (s *aerospikeScaler) GetMetricsAndActivity(ctx context.Context, metricName 
 		Value:      *resource.NewQuantity(records, resource.DecimalSI),
 	}
 
-	// Determine if scaling should be active (e.g., records >= threshold)
-	isActive := records >= s.metadata.threshold
-
-	// Return the metric, and whether scaling should be active
-	return []external_metrics.ExternalMetricValue{metric}, isActive, nil
+	// Return the metric, and scaling is always active
+	return []external_metrics.ExternalMetricValue{metric}, true, nil
 }
 
 // Close closes the Aerospike client
@@ -151,14 +143,22 @@ func (s *aerospikeScaler) Close(_ context.Context) error {
 
 func getClientPolicy(metadata *aerospikeMetadata) *as.ClientPolicy {
 	policy := as.NewClientPolicy()
-	policy.User = metadata.userName
-	policy.Password = metadata.password
-	policy.UseServicesAlternate = metadata.useServicesAlternate
+	policy.User = metadata.UserName
+	policy.Password = metadata.Password
+	policy.UseServicesAlternate = metadata.UseServicesAlternate
 	// Consider exposing this as a configurable parameter.
-	if metadata.connTimeout != 0 {
-		policy.Timeout = time.Duration(metadata.connTimeout) * time.Second
+	if metadata.ConnTimeout != 0 {
+		policy.Timeout = time.Duration(metadata.ConnTimeout) * time.Second
 	}
-	// TODO: Implement TLS policy configuration based on cluster requirements.
+
+	// tls config
+	if metadata.TLSName != "" {
+		tlsConfig, err := kedautil.NewTLSConfigWithPassword(metadata.Cert, metadata.Key, metadata.KeyPassword, metadata.CA, false)
+		if err != nil {
+			logrus.Errorf("Error creating TLS config: %v", err)
+		}
+		policy.TlsConfig = tlsConfig
+	}
 
 	return policy
 }
@@ -197,14 +197,12 @@ func (s *aerospikeScaler) getAerospikeStats() (int64, error) {
 			return 0, err
 		}
 
-		result, err := fetchRequestInfoFromAerospike([]string{s.metadata.command}, conn)
+		result, err := fetchRequestInfoFromAerospike(s.logger, []string{s.metadata.Command}, conn)
 		if err != nil {
-			return 0, err
+			return 0, fmt.Errorf("error fetching info from Aerospike: %s", err)
 		}
 
-		val := parseStatValue(result[s.metadata.command], s.metadata.metricName)
-
-		fmt.Printf("Result node name: %s: %v\n", node.GetName(), val)
+		val := parseStatValue(result[s.metadata.Command], s.metadata.MetricName)
 
 		valInt, err := strconv.ParseInt(val, 10, 64)
 		if err != nil {
@@ -231,17 +229,22 @@ func parseStatValue(stats string, statName string) string {
 	return ""
 }
 
-func fetchRequestInfoFromAerospike(infoKeys []string, asConnection *as.Connection) (map[string]string, error) {
+func fetchRequestInfoFromAerospike(logger logr.Logger, infoKeys []string, asConnection *as.Connection) (map[string]string, error) {
 	var err error
 	rawMetrics := make(map[string]string)
 	retryCount := 3
+
+	if asConnection == nil {
+		return nil, errors.New("aerospike connection is nil")
+	}
 
 	// Retry for connection, timeout, network errors
 	// including errors from RequestInfo()
 	for i := 0; i < retryCount; i++ {
 		// Validate existing connection
-		if asConnection == nil || !asConnection.IsConnected() {
-			logrus.Debug("Error while connecting to aerospike server: ", err)
+		if !asConnection.IsConnected() {
+			logger.Info("Error while connecting to aerospike server, reconnecting")
+			continue
 		}
 
 		// Info request
