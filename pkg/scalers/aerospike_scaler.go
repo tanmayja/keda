@@ -46,13 +46,18 @@ type aerospikeMetadata struct {
 }
 
 func (s *aerospikeMetadata) Validate() error {
-	if s.TLSName != "" {
-		if s.Cert == "" || s.Key == "" {
-			return fmt.Errorf("cert and key are required for TLS")
+	if s.TLSName != "" && (s.Cert == "" || s.Key == "") {
+		return fmt.Errorf("cert and key are required for TLS")
+	}
+
+	allowedPrefixes := []string{"statistics", "namespace", "get-stats"}
+	for _, prefix := range allowedPrefixes {
+		if strings.HasPrefix(s.Command, prefix) {
+			return nil
 		}
 	}
 
-	return nil
+	return fmt.Errorf("command must start with one of the following prefixes: %v", allowedPrefixes)
 }
 
 // NewAerospikeScaler creates a new scaler for Aerospike
@@ -61,19 +66,18 @@ func NewAerospikeScaler(config *scalersconfig.ScalerConfig) (Scaler, error) {
 
 	metadata, err := parseAerospikeMetadata(config)
 	if err != nil {
-		return nil, fmt.Errorf("error parsing Aerospike metadata: %s", err)
+		return nil, fmt.Errorf("error parsing Aerospike metadata: %s", err.Error())
 	}
 
 	policy := getClientPolicy(logger, metadata)
 
-	host := as.Host{
+	client, err := as.NewClientWithPolicyAndHost(policy, &as.Host{
 		Name:    metadata.AerospikeHost,
 		Port:    metadata.AerospikePort,
 		TLSName: metadata.TLSName,
-	}
-	client, err := as.NewClientWithPolicyAndHost(policy, &host)
+	})
 	if err != nil {
-		return nil, fmt.Errorf("error creating Aerospike client: %s", err)
+		return nil, fmt.Errorf("error creating Aerospike client: %s", err.Error())
 	}
 
 	return &aerospikeScaler{
@@ -107,10 +111,10 @@ func (s *aerospikeScaler) GetMetricSpecForScaling(context.Context) []v2.MetricSp
 	return []v2.MetricSpec{metricSpec}
 }
 
+// parseAerospikeMetadata parses and validates scaler metadata
 func parseAerospikeMetadata(config *scalersconfig.ScalerConfig) (*aerospikeMetadata, error) {
 	meta := aerospikeMetadata{}
-	err := config.TypedConfig(&meta)
-	if err != nil {
+	if err := config.TypedConfig(&meta); err != nil {
 		return nil, fmt.Errorf("error parsing aerospike metadata: %w", err)
 	}
 
@@ -119,7 +123,6 @@ func parseAerospikeMetadata(config *scalersconfig.ScalerConfig) (*aerospikeMetad
 
 // GetMetricsAndActivity fetches external metrics and determines if scaling is needed
 func (s *aerospikeScaler) GetMetricsAndActivity(_ context.Context, metricName string) ([]external_metrics.ExternalMetricValue, bool, error) {
-	// Fetch the current number of records from Aerospike
 	records, err := s.getAerospikeStats()
 	if err != nil {
 		return nil, false, err
@@ -131,7 +134,6 @@ func (s *aerospikeScaler) GetMetricsAndActivity(_ context.Context, metricName st
 		Value:      *resource.NewQuantity(records, resource.DecimalSI),
 	}
 
-	// Return the metric, and scaling is always active
 	return []external_metrics.ExternalMetricValue{metric}, true, nil
 }
 
@@ -148,12 +150,12 @@ func (s *aerospikeScaler) Close(_ context.Context) error {
 	return nil
 }
 
+// createClientPolicy initializes the client policy with configuration and TLS
 func getClientPolicy(logger logr.Logger, metadata *aerospikeMetadata) *as.ClientPolicy {
 	policy := as.NewClientPolicy()
 	policy.User = metadata.UserName
 	policy.Password = metadata.Password
 	policy.UseServicesAlternate = metadata.UseServicesAlternate
-	// Consider exposing this as a configurable parameter.
 	if metadata.ConnTimeout != 0 {
 		policy.Timeout = time.Duration(metadata.ConnTimeout) * time.Second
 	}
@@ -192,53 +194,49 @@ func (s *aerospikeScaler) createNewConnection(asServerHost *as.Host) (*as.Connec
 	return asConnection, nil
 }
 
-// getAerospikeStats fetches the current number of records in the specified Aerospike namespace
+// getAerospikeStats fetches the average value of the specified Aerospike metric
 func (s *aerospikeScaler) getAerospikeStats() (int64, error) {
-	sumVal := 0
+	var sum int
 
 	nodes := s.client.GetNodes()
 	for _, node := range nodes {
-		conn := s.connections[node.GetName()]
-		if conn == nil || !conn.IsConnected() {
-			newConn, err := s.createNewConnection(node.GetHost())
-			if err != nil {
-				return 0, err
-			}
-
-			s.connections[node.GetName()] = newConn
-		}
-
-		result, err := fetchRequestInfoFromAerospike(s.logger, []string{s.metadata.Command}, s.connections[node.GetName()])
+		result, err := s.fetchRequestInfoFromAerospike(node)
 		if err != nil {
 			return 0, fmt.Errorf("error fetching info from Aerospike: %s", err)
 		}
 
-		val := parseStatValue(result[s.metadata.Command], s.metadata.MetricName)
-
-		valInt, err := strconv.ParseInt(val, 10, 64)
+		val, err := parseStatValue(result[s.metadata.Command], s.metadata.MetricName)
 		if err != nil {
-			return 0, err
+			return 0, fmt.Errorf("error parsing stat value: %s", err)
 		}
 
-		sumVal += int(valInt)
+		sum += int(val)
 	}
 
-	return int64(sumVal / len(nodes)), nil
+	return int64(sum / len(nodes)), nil
 }
 
 // Helper function to parse specific stat value from the info response
-func parseStatValue(stats string, statName string) string {
-	parts := strings.Split(stats, ";")
-	for _, part := range parts {
-		statParts := strings.Split(part, "=")
-		if len(statParts) == 2 && statParts[0] == statName {
-			return statParts[1]
+func parseStatValue(stats string, metricName string) (int64, error) {
+	for _, part := range strings.Split(stats, ";") {
+		statParts := strings.SplitN(part, "=", 2)
+		if len(statParts) != 2 {
+			continue // Skip invalid formats
+		}
+
+		if statParts[0] == metricName {
+			valInt, err := strconv.ParseInt(statParts[1], 10, 64)
+			if err != nil {
+				return 0, fmt.Errorf("failed to parse metric value: %v", err)
+			}
+			return valInt, nil
 		}
 	}
-	return ""
+
+	return 0, fmt.Errorf("metric not found: %s", metricName)
 }
 
-func fetchRequestInfoFromAerospike(logger logr.Logger, infoKeys []string, asConnection *as.Connection) (map[string]string, error) {
+func (s *aerospikeScaler) fetchRequestInfoFromAerospike(node *as.Node) (map[string]string, error) {
 	var err error
 	rawMetrics := make(map[string]string)
 	retryCount := 3
@@ -246,13 +244,22 @@ func fetchRequestInfoFromAerospike(logger logr.Logger, infoKeys []string, asConn
 	// Retry for connection, timeout, network errors
 	// including errors from RequestInfo()
 	for i := 0; i < retryCount; i++ {
+		conn := s.connections[node.GetName()]
+		if conn == nil || !conn.IsConnected() {
+			newConn, err := s.createNewConnection(node.GetHost())
+			if err != nil {
+				s.logger.Info("Error while creating new connection, retrying", "Error is: ", err.Error())
+				return nil, err
+			}
+
+			s.connections[node.GetName()] = newConn
+		}
 		// Info request
-		rawMetrics, err = asConnection.RequestInfo(infoKeys...)
+		rawMetrics, err = s.connections[node.GetName()].RequestInfo(s.metadata.Command)
 		if err != nil {
-			logger.Info("Error while requestInfo ( infoKeys...), closing connection : Error is: ", err, " and infoKeys: ", infoKeys)
-			asConnection.Close()
-			//TODO: do we need to assign nil to asConnection? i.e. asConnection = nil
-			// what is the point of retry if we are closing the connection
+			s.logger.Info("Error while requestInfo closing connection and retrying", "Error is: ", err.Error(), "infoKey: ", s.metadata.Command)
+			s.connections[node.GetName()].Close()
+
 			continue
 		}
 
