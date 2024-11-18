@@ -36,6 +36,7 @@ type aerospikeMetadata struct {
 	UseServicesAlternate bool   `keda:"name=useServicesAlternate, order=triggerMetadata"`
 	ConnTimeout          int64  `keda:"name=connTimeout,          order=triggerMetadata"`
 	Command              string `keda:"name=command,              order=triggerMetadata"`
+	TriggerIndex         int
 
 	// TLS
 	TLSName     string `keda:"name=tlsName,     order=triggerMetadata, optional"`
@@ -95,7 +96,7 @@ func (s *aerospikeScaler) GetMetricSpecForScaling(context.Context) []v2.MetricSp
 
 	externalMetric := &v2.ExternalMetricSource{
 		Metric: v2.MetricIdentifier{
-			Name: s.metadata.MetricName,
+			Name: GenerateMetricNameWithIndex(s.metadata.TriggerIndex, kedautil.NormalizeString(fmt.Sprintf("aerospike-%s", s.metadata.MetricName))),
 		},
 		Target: v2.MetricTarget{
 			Type:  v2.ValueMetricType,
@@ -117,6 +118,8 @@ func parseAerospikeMetadata(config *scalersconfig.ScalerConfig) (*aerospikeMetad
 	if err := config.TypedConfig(&meta); err != nil {
 		return nil, fmt.Errorf("error parsing aerospike metadata: %w", err)
 	}
+
+	meta.TriggerIndex = config.TriggerIndex
 
 	return &meta, nil
 }
