@@ -126,7 +126,7 @@ func parseAerospikeMetadata(config *scalersconfig.ScalerConfig) (*aerospikeMetad
 
 // GetMetricsAndActivity fetches external metrics and determines if scaling is needed
 func (s *aerospikeScaler) GetMetricsAndActivity(_ context.Context, metricName string) ([]external_metrics.ExternalMetricValue, bool, error) {
-	records, err := s.getAerospikeStats()
+	result, err := s.getAerospikeStats()
 	if err != nil {
 		return nil, false, err
 	}
@@ -134,7 +134,7 @@ func (s *aerospikeScaler) GetMetricsAndActivity(_ context.Context, metricName st
 	// Prepare the metric value to return
 	metric := external_metrics.ExternalMetricValue{
 		MetricName: metricName,
-		Value:      *resource.NewQuantity(records, resource.DecimalSI),
+		Value:      *resource.NewQuantity(int64(result), resource.DecimalSI),
 	}
 
 	return []external_metrics.ExternalMetricValue{metric}, true, nil
@@ -198,8 +198,8 @@ func (s *aerospikeScaler) createNewConnection(asServerHost *as.Host) (*as.Connec
 }
 
 // getAerospikeStats fetches the average value of the specified Aerospike metric
-func (s *aerospikeScaler) getAerospikeStats() (int64, error) {
-	var sum int
+func (s *aerospikeScaler) getAerospikeStats() (float64, error) {
+	var sum float64
 
 	nodes := s.client.GetNodes()
 	for _, node := range nodes {
@@ -213,14 +213,20 @@ func (s *aerospikeScaler) getAerospikeStats() (int64, error) {
 			return 0, fmt.Errorf("error parsing stat value: %s", err)
 		}
 
-		sum += int(val)
+		if value, err := strconv.ParseInt(val, 10, 64); err == nil {
+			sum += float64(value)
+		} else if value, err := strconv.ParseFloat(val, 64); err == nil {
+			sum += value
+		} else {
+			return 0, fmt.Errorf("metric value is neither int nor float: %s", val)
+		}
 	}
 
-	return int64(sum / len(nodes)), nil
+	return sum / float64(len(nodes)), nil
 }
 
 // Helper function to parse specific stat value from the info response
-func parseStatValue(stats string, metricName string) (int64, error) {
+func parseStatValue(stats string, metricName string) (string, error) {
 	for _, part := range strings.Split(stats, ";") {
 		statParts := strings.SplitN(part, "=", 2)
 		if len(statParts) != 2 {
@@ -228,15 +234,11 @@ func parseStatValue(stats string, metricName string) (int64, error) {
 		}
 
 		if statParts[0] == metricName {
-			valInt, err := strconv.ParseInt(statParts[1], 10, 64)
-			if err != nil {
-				return 0, fmt.Errorf("failed to parse metric value: %v", err)
-			}
-			return valInt, nil
+			return statParts[1], nil
 		}
 	}
 
-	return 0, fmt.Errorf("metric not found: %s", metricName)
+	return "", fmt.Errorf("metric not found: %s", metricName)
 }
 
 func (s *aerospikeScaler) fetchRequestInfoFromAerospike(node *as.Node) (map[string]string, error) {
